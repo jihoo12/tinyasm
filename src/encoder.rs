@@ -21,8 +21,15 @@ pub enum Instruction {
     Mov(Operand, Operand), // Destination, Source
     Add(Operand, Operand),
     Sub(Operand, Operand),
+    And(Operand, Operand),
+    Or(Operand, Operand),
+    Xor(Operand, Operand),
+    Not(Operand),
+    Shl(Operand, Operand),
+    Shr(Operand, Operand),
     Mul(Operand), // Operand is r/m64
     Div(Operand), // Operand is r/m64
+    Syscall,
 }
 
 pub fn encode_instruction(instr: Instruction) -> Vec<u8> {
@@ -31,10 +38,98 @@ pub fn encode_instruction(instr: Instruction) -> Vec<u8> {
         Instruction::Mov(dst, src) => encode_mov(dst, src, &mut bytes),
         Instruction::Add(dst, src) => encode_arithmetic(0x01, 0x03, 0, dst, src, &mut bytes),
         Instruction::Sub(dst, src) => encode_arithmetic(0x29, 0x2B, 5, dst, src, &mut bytes),
+        Instruction::And(dst, src) => encode_arithmetic(0x21, 0x23, 4, dst, src, &mut bytes),
+        Instruction::Or(dst, src) => encode_arithmetic(0x09, 0x0B, 1, dst, src, &mut bytes),
+        Instruction::Xor(dst, src) => encode_arithmetic(0x31, 0x33, 6, dst, src, &mut bytes),
+        Instruction::Shl(dst, count) => encode_shift(4, dst, count, &mut bytes),
+        Instruction::Shr(dst, count) => encode_shift(5, dst, count, &mut bytes),
+        Instruction::Not(op) => encode_unary(0xF7, 2, op, &mut bytes),
         Instruction::Mul(op) => encode_unary(0xF7, 4, op, &mut bytes),
         Instruction::Div(op) => encode_unary(0xF7, 6, op, &mut bytes),
+        Instruction::Syscall => bytes.extend_from_slice(&[0x0F, 0x05]),
     }
     bytes
+}
+
+fn encode_shift(ext_idx: u8, dst: Operand, count: Operand, bytes: &mut Vec<u8>) {
+    match count {
+        Operand::Reg(Register::RCX) => {
+            // SHL r/m64, CL -> D3 /ext
+            match dst {
+                Operand::Reg(reg) => {
+                    let mut rex = 0x48;
+                    if reg.is_extended() {
+                        rex |= 0x01;
+                    }
+                    bytes.push(rex);
+                    bytes.push(0xD3);
+                    bytes.push(0xC0 | (ext_idx << 3) | reg.code());
+                }
+                Operand::Mem(mem) => {
+                    let (modrm, sib, disp_size) = encode_mem_parts(ext_idx, false, mem, bytes);
+                    bytes.push(0xD3);
+                    bytes.push(modrm);
+                    if let Some(s) = sib {
+                        bytes.push(s);
+                    }
+                    push_displacement(mem.disp, disp_size, bytes);
+                }
+                _ => panic!("Unsupported destination for shift"),
+            }
+        }
+        Operand::Imm32(imm) => {
+            if imm == 1 {
+                // SHL r/m64, 1 -> D1 /ext
+                match dst {
+                    Operand::Reg(reg) => {
+                        let mut rex = 0x48;
+                        if reg.is_extended() {
+                            rex |= 0x01;
+                        }
+                        bytes.push(rex);
+                        bytes.push(0xD1);
+                        bytes.push(0xC0 | (ext_idx << 3) | reg.code());
+                    }
+                    Operand::Mem(mem) => {
+                        let (modrm, sib, disp_size) = encode_mem_parts(ext_idx, false, mem, bytes);
+                        bytes.push(0xD1);
+                        bytes.push(modrm);
+                        if let Some(s) = sib {
+                            bytes.push(s);
+                        }
+                        push_displacement(mem.disp, disp_size, bytes);
+                    }
+                    _ => panic!("Unsupported destination for shift"),
+                }
+            } else {
+                // SHL r/m64, imm8 -> C1 /ext ib
+                match dst {
+                    Operand::Reg(reg) => {
+                        let mut rex = 0x48;
+                        if reg.is_extended() {
+                            rex |= 0x01;
+                        }
+                        bytes.push(rex);
+                        bytes.push(0xC1);
+                        bytes.push(0xC0 | (ext_idx << 3) | reg.code());
+                        bytes.push(imm as u8);
+                    }
+                    Operand::Mem(mem) => {
+                        let (modrm, sib, disp_size) = encode_mem_parts(ext_idx, false, mem, bytes);
+                        bytes.push(0xC1);
+                        bytes.push(modrm);
+                        if let Some(s) = sib {
+                            bytes.push(s);
+                        }
+                        push_displacement(mem.disp, disp_size, bytes);
+                        bytes.push(imm as u8);
+                    }
+                    _ => panic!("Unsupported destination for shift"),
+                }
+            }
+        }
+        _ => panic!("Unsupported count for shift (only CL or Imm8/32 supported)"),
+    }
 }
 
 fn encode_unary(opcode: u8, ext_idx: u8, op: Operand, bytes: &mut Vec<u8>) {
@@ -360,5 +455,84 @@ mod tests {
         let instr = Instruction::Mul(Operand::Mem(mem));
         let bytes = encode_instruction(instr);
         assert_eq!(bytes, vec![0x48, 0xF7, 0x60, 0x08]);
+    }
+
+    #[test]
+    fn test_and_or() {
+        // and rax, rbx -> 48 21 D8
+        let instr = Instruction::And(Operand::Reg(RAX), Operand::Reg(RBX));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0x21, 0xD8]);
+
+        // or rcx, 0x12 -> 48 83 C9 12
+        // Wait, for OR with imm8, the extension is 1. Opcode 0x83.
+        // OR r/m64, imm8 -> 48 83 /1 ib.
+        // C9 is 11_001_001. Mod=11, Reg=1 (OR), RM=1 (RCX). Correct.
+        let instr = Instruction::Or(Operand::Reg(RCX), Operand::Imm32(0x12));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0x83, 0xC9, 0x12]);
+
+        // and [rdx], rsi -> 48 21 32
+        let mem = MemoryAddr {
+            base: Some(RDX),
+            index: None,
+            scale: 1,
+            disp: 0,
+        };
+        let instr = Instruction::And(Operand::Mem(mem), Operand::Reg(RSI));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0x21, 0x32]);
+    }
+
+    #[test]
+    fn test_xor_not() {
+        // xor rax, rax -> 48 31 C0
+        let instr = Instruction::Xor(Operand::Reg(RAX), Operand::Reg(RAX));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0x31, 0xC0]);
+
+        // not rbx -> 48 F7 D3
+        // NOT is /2 extension of 0xF7. D3 is 11_010_011. Mod=11, Reg=2, RM=3 (RBX).
+        let instr = Instruction::Not(Operand::Reg(RBX));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0xF7, 0xD3]);
+
+        // xor rdi, 0x1234 -> 48 81 F7 34 12 00 00
+        // Extension for XOR is 6. ModRM = 0xC0 | (6 << 3) | 7 (RDI) = 0xF7.
+        let instr = Instruction::Xor(Operand::Reg(RDI), Operand::Imm32(0x1234));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0x81, 0xF7, 0x34, 0x12, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn test_shifts() {
+        // shl rax, 4 -> 48 C1 E0 04
+        let instr = Instruction::Shl(Operand::Reg(RAX), Operand::Imm32(4));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0xC1, 0xE0, 0x04]);
+
+        // shr rbx, cl -> 48 D3 EB
+        let instr = Instruction::Shr(Operand::Reg(RBX), Operand::Reg(RCX));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0xD3, 0xEB]);
+
+        // shl qword [rdi], 1 -> 48 D1 27
+        let mem = MemoryAddr {
+            base: Some(RDI),
+            index: None,
+            scale: 1,
+            disp: 0,
+        };
+        let instr = Instruction::Shl(Operand::Mem(mem), Operand::Imm32(1));
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x48, 0xD1, 0x27]);
+    }
+
+    #[test]
+    fn test_syscall() {
+        // syscall -> 0F 05
+        let instr = Instruction::Syscall;
+        let bytes = encode_instruction(instr);
+        assert_eq!(bytes, vec![0x0F, 0x05]);
     }
 }

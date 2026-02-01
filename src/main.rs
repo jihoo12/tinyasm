@@ -29,6 +29,20 @@ fn main() {
             scale: 1,
             disp: 8,
         })),
+        // and rax, rbx
+        Instruction::And(Operand::Reg(RAX), Operand::Reg(RBX)),
+        // or rcx, 0x12
+        Instruction::Or(Operand::Reg(RCX), Operand::Imm32(0x12)),
+        // xor rax, rax
+        Instruction::Xor(Operand::Reg(RAX), Operand::Reg(RAX)),
+        // not rbx
+        Instruction::Not(Operand::Reg(RBX)),
+        // shl rax, 4
+        Instruction::Shl(Operand::Reg(RAX), Operand::Imm32(4)),
+        // shr rbx, cl
+        Instruction::Shr(Operand::Reg(RBX), Operand::Reg(RCX)),
+        // syscall
+        Instruction::Syscall,
     ];
 
     for instr in instructions {
