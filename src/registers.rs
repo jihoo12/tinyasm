@@ -48,3 +48,27 @@ impl Register {
         }
     }
 }
+
+impl std::fmt::Display for Register {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Register::RAX => "rax",
+            Register::RCX => "rcx",
+            Register::RDX => "rdx",
+            Register::RBX => "rbx",
+            Register::RSP => "rsp",
+            Register::RBP => "rbp",
+            Register::RSI => "rsi",
+            Register::RDI => "rdi",
+            Register::R8 => "r8",
+            Register::R9 => "r9",
+            Register::R10 => "r10",
+            Register::R11 => "r11",
+            Register::R12 => "r12",
+            Register::R13 => "r13",
+            Register::R14 => "r14",
+            Register::R15 => "r15",
+        };
+        write!(f, "{}", s)
+    }
+}

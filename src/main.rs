@@ -1,7 +1,9 @@
 mod encoder;
+mod jit;
 mod registers;
 
 use crate::encoder::{Instruction, MemoryAddr, Operand, encode_instruction};
+use crate::jit::JitMemory;
 use crate::registers::Register::*;
 
 fn main() {
@@ -43,10 +45,51 @@ fn main() {
         Instruction::Shr(Operand::Reg(RBX), Operand::Reg(RCX)),
         // syscall
         Instruction::Syscall,
+        Instruction::Ret,
     ];
 
-    for instr in instructions {
-        let bytes = encode_instruction(instr);
-        println!("{:?} -> {:02X?}", instr, bytes);
+    println!("--- Encoding Check ---");
+    for instr in &instructions {
+        match encode_instruction(*instr) {
+            Ok(bytes) => println!("{} -> {:02X?}", instr, bytes),
+            Err(e) => println!("{} -> Error: {}", instr, e),
+        }
+    }
+
+    println!("\n--- JIT Execution ---");
+    let jit_instrs = vec![
+        // mov rax, 42
+        Instruction::Mov(Operand::Reg(RAX), Operand::Imm64(42)),
+        Instruction::Ret,
+    ];
+
+    let mut code_buf = Vec::new();
+    for instr in jit_instrs {
+        match encode_instruction(instr) {
+            Ok(bytes) => code_buf.extend_from_slice(&bytes),
+            Err(e) => {
+                println!("Encoding error: {}", e);
+                return;
+            }
+        }
+    }
+
+    match JitMemory::new(4096) {
+        Ok(mut memory) => {
+            if let Err(e) = memory.write(&code_buf) {
+                println!("JIT write error: {}", e);
+                return;
+            }
+            if let Err(e) = memory.make_executable() {
+                println!("JIT protect error: {}", e);
+                return;
+            }
+
+            println!("Executing JIT code...");
+            let func = unsafe { memory.as_fn_u64() };
+            let result = func();
+            println!("JIT result: {}", result);
+        }
+        Err(e) => println!("JIT allocation error: {}", e),
     }
 }
