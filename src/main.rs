@@ -11,7 +11,7 @@ use crate::assembler::Assembler;
 use crate::jit::JitMemory;
 
 fn main() {
-    let mut asm = Assembler::new();
+    let mut asm = Assembler::new().with_debug(true);
 
     // === 루프(Loop) 예제: RAX를 0부터 5까지 증가시키기 ===
 

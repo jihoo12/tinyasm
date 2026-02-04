@@ -5,7 +5,9 @@ pub struct Assembler {
     // 코드 전체를 저장
     instructions: Vec<Instruction>,
     // 라벨 이름 -> 바이트 오프셋 (주소) 매핑
-    labels: HashMap<String, usize>, 
+    labels: HashMap<String, usize>,
+    // 🔥 추가: 디버그 모드 플래그
+    debug: bool,
 }
 
 impl Assembler {
@@ -13,7 +15,14 @@ impl Assembler {
         Self {
             instructions: Vec::new(),
             labels: HashMap::new(),
+            debug: false, // 기본값은 '출력 안 함'
         }
+    }
+
+    // 🔥 추가: 체이닝 방식으로 디버그 모드를 설정할 수 있는 메서드
+    pub fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
     }
 
     pub fn add_instruction(&mut self, instr: Instruction) {
@@ -23,6 +32,8 @@ impl Assembler {
     // 🔥 핵심 로직: 2-Pass 어셈블리 수행
     pub fn assemble(&mut self) -> Result<Vec<u8>, EncodeError> {
         // --- [Pass 1] 주소 계산 및 심볼 테이블 작성 ---
+        if self.debug { println!("--- [Pass 1] Symbol Resolution ---"); }
+        
         let mut current_offset = 0;
         self.labels.clear();
 
@@ -31,43 +42,49 @@ impl Assembler {
                 Instruction::Label(name) => {
                     // 현재 위치(offset)를 라벨 이름과 함께 기록
                     self.labels.insert(name.clone(), current_offset);
+                    if self.debug { println!("  Label defined: {} at offset 0x{:X}", name, current_offset); }
                 }
                 _ => {
                     // 명령어의 크기를 더함
-                    current_offset += self.estimate_size(instr)?;
+                    let size = self.estimate_size(instr)?;
+                    current_offset += size;
                 }
             }
         }
 
         // --- [Pass 2] 실제 기계어 생성 ---
+        if self.debug { println!("--- [Pass 2] Code Generation ---"); }
+
         let mut output_bytes = Vec::new();
         let mut current_offset = 0; // 다시 0부터 시작
 
         for instr in &self.instructions {
-            match instr {
+            // 디버그 모드일 때 현재 처리 중인 명령어 출력
+            if self.debug { 
+                print!("  [0x{:04X}] {:<30} => ", current_offset, format!("{}", instr)); 
+            }
+
+            let instr_bytes = match instr {
                 Instruction::Label(_) => {
-                    // 라벨은 실제 코드로 변환되지 않음 (위치만 표시할 뿐)
+                    if self.debug { println!("(Label)"); }
+                    // 라벨은 실제 코드로 변환되지 않음
                     continue;
                 }
                 Instruction::JmpLabel(target) => {
-                    // 1. 타겟 라벨의 주소를 가져옴
                     let target_addr = *self.labels.get(target)
                         .ok_or(EncodeError::Other(format!("Label not found: {}", target)))?;
                     
-                    // 2. 상대 주소 계산 (Target - (Current + 5))
-                    // JMP(E9)는 5바이트 명령어이므로, 명령어 끝나는 지점 기준 차이를 구함
                     let instr_len = 5;
                     let next_ip = current_offset + instr_len;
                     let relative_offset = (target_addr as i32) - (next_ip as i32);
 
-                    // 3. 바이트 생성 (0xE9 + disp32)
-                    output_bytes.push(0xE9);
-                    output_bytes.extend_from_slice(&relative_offset.to_le_bytes());
+                    let mut bytes = vec![0xE9];
+                    bytes.extend_from_slice(&relative_offset.to_le_bytes());
                     
                     current_offset += instr_len;
+                    bytes
                 }
                 Instruction::JeLabel(target) => {
-                    // JE (0F 84) + disp32 (총 6바이트)
                     let target_addr = *self.labels.get(target)
                         .ok_or(EncodeError::Other(format!("Label not found: {}", target)))?;
                     
@@ -75,13 +92,12 @@ impl Assembler {
                     let next_ip = current_offset + instr_len;
                     let relative_offset = (target_addr as i32) - (next_ip as i32);
 
-                    output_bytes.push(0x0F);
-                    output_bytes.push(0x84);
-                    output_bytes.extend_from_slice(&relative_offset.to_le_bytes());
+                    let mut bytes = vec![0x0F, 0x84];
+                    bytes.extend_from_slice(&relative_offset.to_le_bytes());
                     
                     current_offset += instr_len;
+                    bytes
                 }
-                // 🔥 추가된 부분: JNE 처리
                 Instruction::JneLabel(target) => {
                     let target_addr = *self.labels.get(target)
                         .ok_or(EncodeError::Other(format!("Label not found: {}", target)))?;
@@ -90,33 +106,39 @@ impl Assembler {
                     let next_ip = current_offset + instr_len;
                     let relative_offset = (target_addr as i32) - (next_ip as i32);
 
-                    output_bytes.push(0x0F);
-                    output_bytes.push(0x85); // JNE opcode
-                    output_bytes.extend_from_slice(&relative_offset.to_le_bytes());
+                    let mut bytes = vec![0x0F, 0x85];
+                    bytes.extend_from_slice(&relative_offset.to_le_bytes());
                     current_offset += instr_len;
+                    bytes
                 }
                 _ => {
-                    // 일반 명령어: 기존 인코더 사용
                     let bytes = encode_instruction(instr.clone())?;
                     current_offset += bytes.len();
-                    output_bytes.extend(bytes);
+                    bytes
                 }
+            };
+
+            // 디버그 모드일 때 생성된 바이트 출력
+            if self.debug {
+                print!("[");
+                for b in &instr_bytes { print!("{:02X} ", b); }
+                println!("]");
             }
+
+            output_bytes.extend(instr_bytes);
         }
 
         Ok(output_bytes)
     }
 
     // 📏 명령어 크기 예측 함수
-    // 점프 명령어는 5바이트(JMP) 혹은 6바이트(Jcc)로 고정한다고 가정 (단순화를 위해 Long Jump 사용)
     fn estimate_size(&self, instr: &Instruction) -> Result<usize, EncodeError> {
         match instr {
             Instruction::Label(_) => Ok(0),
-            Instruction::JmpLabel(_) => Ok(5), // E9 xx xx xx xx
-            Instruction::JeLabel(_) => Ok(6),  // 0F 84 xx xx xx xx
-            Instruction::JneLabel(_) => Ok(6), // 0F 85 xx xx xx xx
+            Instruction::JmpLabel(_) => Ok(5), 
+            Instruction::JeLabel(_) => Ok(6), 
+            Instruction::JneLabel(_) => Ok(6), 
             _ => {
-                // 일반 명령어는 실제로 인코딩해봐서 길이를 잰다 (가장 확실한 방법)
                 let bytes = encode_instruction(instr.clone())?;
                 Ok(bytes.len())
             }
