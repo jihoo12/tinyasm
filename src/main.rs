@@ -1,95 +1,60 @@
-mod encoder;
-mod jit;
+// 1. 프로젝트 내의 다른 파일(모듈)들을 불러옵니다.
 mod registers;
+mod encoder;
+mod assembler;
+mod jit;
 
-use crate::encoder::{Instruction, MemoryAddr, Operand, encode_instruction};
+// 2. 필요한 타입들을 현재 범위로 가져옵니다.
+use crate::registers::Register::*; // RAX, RCX 등을 바로 쓰기 위함
+use crate::encoder::{Instruction, Operand}; // Instruction, Operand 사용
+use crate::assembler::Assembler;
 use crate::jit::JitMemory;
-use crate::registers::Register::*;
 
 fn main() {
-    let instructions = vec![
-        Instruction::Mov(Operand::Reg(RAX), Operand::Imm64(0x123456789ABCDEF0)),
-        Instruction::Add(Operand::Reg(RAX), Operand::Reg(RBX)),
-        // sub rdi, 10
-        Instruction::Sub(Operand::Reg(RDI), Operand::Imm32(10)),
-        // add [rbx + rcx * 4 + 8], rax
-        Instruction::Add(
-            Operand::Mem(MemoryAddr {
-                base: Some(RBX),
-                index: Some(RCX),
-                scale: 4,
-                disp: 8,
-            }),
-            Operand::Reg(RAX),
-        ),
-        // mul rbx
-        Instruction::Mul(Operand::Reg(RBX)),
-        // div qword [rax + 8]
-        Instruction::Div(Operand::Mem(MemoryAddr {
-            base: Some(RAX),
-            index: None,
-            scale: 1,
-            disp: 8,
-        })),
-        // and rax, rbx
-        Instruction::And(Operand::Reg(RAX), Operand::Reg(RBX)),
-        // or rcx, 0x12
-        Instruction::Or(Operand::Reg(RCX), Operand::Imm32(0x12)),
-        // xor rax, rax
-        Instruction::Xor(Operand::Reg(RAX), Operand::Reg(RAX)),
-        // not rbx
-        Instruction::Not(Operand::Reg(RBX)),
-        // shl rax, 4
-        Instruction::Shl(Operand::Reg(RAX), Operand::Imm32(4)),
-        // shr rbx, cl
-        Instruction::Shr(Operand::Reg(RBX), Operand::Reg(RCX)),
-        // syscall
-        Instruction::Syscall,
-        Instruction::Ret,
-    ];
+    let mut asm = Assembler::new();
 
-    println!("--- Encoding Check ---");
-    for instr in &instructions {
-        match encode_instruction(*instr) {
-            Ok(bytes) => println!("{} -> {:02X?}", instr, bytes),
-            Err(e) => println!("{} -> Error: {}", instr, e),
-        }
-    }
+    // === 루프(Loop) 예제: RAX를 0부터 5까지 증가시키기 ===
 
-    println!("\n--- JIT Execution ---");
-    let jit_instrs = vec![
-        // mov rax, 42
-        Instruction::Mov(Operand::Reg(RAX), Operand::Imm64(42)),
-        Instruction::Ret,
-    ];
+    // 1. 초기화: mov rax, 0
+    asm.add_instruction(Instruction::Mov(Operand::Reg(RAX), Operand::Imm32(0)));
+    
+    // 2. 라벨 정의: loop_start (여기로 다시 돌아올 예정)
+    asm.add_instruction(Instruction::Label("loop_start".to_string()));
 
-    let mut code_buf = Vec::new();
-    for instr in jit_instrs {
-        match encode_instruction(instr) {
-            Ok(bytes) => code_buf.extend_from_slice(&bytes),
-            Err(e) => {
-                println!("Encoding error: {}", e);
-                return;
-            }
-        }
-    }
+    // 3. 값 증가: add rax, 1
+    asm.add_instruction(Instruction::Add(Operand::Reg(RAX), Operand::Imm32(1)));
 
-    match JitMemory::new(4096) {
-        Ok(mut memory) => {
-            if let Err(e) = memory.write(&code_buf) {
-                println!("JIT write error: {}", e);
-                return;
-            }
-            if let Err(e) = memory.make_executable() {
-                println!("JIT protect error: {}", e);
-                return;
-            }
+    // 4. 비교: cmp rax, 5
+    // rax와 5를 비교하여 CPU의 EFLAGS 레지스터를 업데이트합니다.
+    asm.add_instruction(Instruction::Cmp(Operand::Reg(RAX), Operand::Imm32(5)));
 
-            println!("Executing JIT code...");
-            let func = unsafe { memory.as_fn_u64() };
+    // 5. 조건부 점프: jne loop_start
+    // Jump if Not Equal: rax가 5가 아니면 "loop_start"로 점프합니다.
+    asm.add_instruction(Instruction::JneLabel("loop_start".to_string()));
+
+    // 6. 종료: ret (함수를 끝내고 rax 값을 반환)
+    asm.add_instruction(Instruction::Ret);
+
+    // --- 실행 과정 ---
+    match asm.assemble() {
+        Ok(code) => {
+            println!("✅ 생성된 기계어: {:02X?}", code);
+            
+            // JIT 메모리 할당 및 쓰기
+            let mut jit = JitMemory::new(code.len()).unwrap_or_else(|e| {
+                panic!("JIT 메모리 할당 실패: {}", e);
+            });
+            
+            jit.write(&code).unwrap();
+            jit.make_executable().unwrap();
+            
+            // 기계어를 함수로 캐스팅하여 실행
+            let func = unsafe { jit.as_fn_u64() };
             let result = func();
-            println!("JIT result: {}", result);
-        }
-        Err(e) => println!("JIT allocation error: {}", e),
+            
+            println!("--- JIT 실행 결과 ---");
+            println!("RAX 최종 값: {}", result); // 5가 나오면 성공!
+        },
+        Err(e) => println!("❌ 어셈블리 오류: {}", e),
     }
 }
