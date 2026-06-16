@@ -19,11 +19,14 @@ pub enum Register {
 }
 
 impl Register {
-    /// Returns the 3-bit code for the register used in ModR/M, Opcode, etc.
-    pub fn code(&self) -> u8 {
+    /// Returns the 3-bit encoding used in ModR/M, SIB, and opcode fields.
+    ///
+    /// For extended registers (R8–R15) the high bit is carried by the REX
+    /// prefix; only the low 3 bits are returned here.
+    pub fn code(self) -> u8 {
         match self {
-            Register::RAX | Register::R8 => 0,
-            Register::RCX | Register::R9 => 1,
+            Register::RAX | Register::R8  => 0,
+            Register::RCX | Register::R9  => 1,
             Register::RDX | Register::R10 => 2,
             Register::RBX | Register::R11 => 3,
             Register::RSP | Register::R12 => 4,
@@ -33,19 +36,19 @@ impl Register {
         }
     }
 
-    /// Returns true if the register is one of the extended registers (R8-R15).
-    pub fn is_extended(&self) -> bool {
-        match self {
+    /// Returns `true` for R8–R15, which require the REX.B/R/X extension bit.
+    pub fn is_extended(self) -> bool {
+        matches!(
+            self,
             Register::R8
-            | Register::R9
-            | Register::R10
-            | Register::R11
-            | Register::R12
-            | Register::R13
-            | Register::R14
-            | Register::R15 => true,
-            _ => false,
-        }
+                | Register::R9
+                | Register::R10
+                | Register::R11
+                | Register::R12
+                | Register::R13
+                | Register::R14
+                | Register::R15
+        )
     }
 }
 
@@ -60,8 +63,8 @@ impl std::fmt::Display for Register {
             Register::RBP => "rbp",
             Register::RSI => "rsi",
             Register::RDI => "rdi",
-            Register::R8 => "r8",
-            Register::R9 => "r9",
+            Register::R8  => "r8",
+            Register::R9  => "r9",
             Register::R10 => "r10",
             Register::R11 => "r11",
             Register::R12 => "r12",

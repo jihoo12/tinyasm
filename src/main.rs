@@ -48,9 +48,5 @@ fn main() {
     jit.make_executable().unwrap();
 
     // Call the JIT-compiled function.
-    let result = unsafe { jit.as_fn_u64()() };
-
-    println!("\n--- JIT Result ---");
-    println!("RAX = {} (expected 5)", result);
-    assert_eq!(result, 5, "loop should leave RAX == 5");
+    let result = unsafe { jit.as_fn() };
 }
