@@ -637,3 +637,74 @@ fn encode_unary(opcode: u8, ext_idx: u8, op: Operand, bytes: &mut Vec<u8>) -> Re
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registers::Register::*;
+
+    fn enc(instr: Instruction) -> Vec<u8> {
+        encode_instruction(instr).unwrap()
+    }
+
+    #[test]
+    fn mov_register_and_immediate_encodings() {
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RAX), Operand::Reg(RCX))), vec![0x48, 0x89, 0xC8]);
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(R8), Operand::Reg(R9))), vec![0x4D, 0x89, 0xC8]);
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RAX), Operand::Imm32(-1))), vec![0x48, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn memory_addressing_covers_sib_and_special_bases() {
+        let rsp = MemoryAddr::base_disp(RSP, 0);
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RAX), Operand::Mem(rsp))), vec![0x48, 0x8B, 0x04, 0x24]);
+
+        let r12 = MemoryAddr::base_disp(R12, 0);
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RAX), Operand::Mem(r12))), vec![0x49, 0x8B, 0x04, 0x24]);
+
+        let rbp = MemoryAddr::base_disp(RBP, 0);
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RAX), Operand::Mem(rbp))), vec![0x48, 0x8B, 0x45, 0x00]);
+
+        let r13 = MemoryAddr::base_disp(R13, 0);
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RAX), Operand::Mem(r13))), vec![0x49, 0x8B, 0x45, 0x00]);
+    }
+
+    #[test]
+    fn indexed_memory_encodes_scale_index_base_and_displacement() {
+        let mem = MemoryAddr { base: Some(RAX), index: Some(RCX), scale: 4, disp: 16 };
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RDX), Operand::Mem(mem))), vec![0x48, 0x8B, 0x54, 0x88, 0x10]);
+
+        let extended = MemoryAddr { base: Some(R12), index: Some(R9), scale: 8, disp: 0x1234 };
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(R10), Operand::Mem(extended))), vec![0x4F, 0x8B, 0x94, 0xCC, 0x34, 0x12, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn arithmetic_selects_imm8_or_imm32_at_boundary() {
+        assert_eq!(enc(Instruction::Add(Operand::Reg(RAX), Operand::Imm32(127))), vec![0x48, 0x83, 0xC0, 0x7F]);
+        assert_eq!(enc(Instruction::Add(Operand::Reg(RAX), Operand::Imm32(128))), vec![0x48, 0x81, 0xC0, 0x80, 0x00, 0x00, 0x00]);
+        assert_eq!(enc(Instruction::Sub(Operand::Reg(R8), Operand::Imm32(-128))), vec![0x49, 0x83, 0xE8, 0x80]);
+        assert_eq!(enc(Instruction::Sub(Operand::Reg(R8), Operand::Imm32(-129))), vec![0x49, 0x81, 0xE8, 0x7F, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn representative_instruction_families_encode_stably() {
+        assert_eq!(enc(Instruction::IMul(Operand::Reg(R10), Operand::Reg(R11))), vec![0x4D, 0x0F, 0xAF, 0xD3]);
+        assert_eq!(enc(Instruction::Xor(Operand::Reg(RAX), Operand::Reg(RAX))), vec![0x48, 0x31, 0xC0]);
+        assert_eq!(enc(Instruction::Test(Operand::Reg(R8), Operand::Reg(R9))), vec![0x4D, 0x85, 0xC8]);
+        assert_eq!(enc(Instruction::Not(Operand::Reg(R12))), vec![0x49, 0xF7, 0xD4]);
+        assert_eq!(enc(Instruction::Shl(Operand::Reg(RAX), Operand::Imm32(1))), vec![0x48, 0xD1, 0xE0]);
+        assert_eq!(enc(Instruction::Shr(Operand::Reg(R9), Operand::Reg(RCX))), vec![0x49, 0xD3, 0xE9]);
+        assert_eq!(enc(Instruction::Call(Operand::Reg(R10))), vec![0x41, 0xFF, 0xD2]);
+        assert_eq!(enc(Instruction::Ret), vec![0xC3]);
+        assert_eq!(enc(Instruction::Syscall), vec![0x0F, 0x05]);
+    }
+
+    #[test]
+    fn invalid_scale_is_rejected() {
+        let mem = MemoryAddr { base: Some(RAX), index: Some(RCX), scale: 3, disp: 0 };
+        assert_eq!(
+            encode_instruction(Instruction::Mov(Operand::Reg(RDX), Operand::Mem(mem))),
+            Err(EncodeError::InvalidScale(3))
+        );
+    }
+}
