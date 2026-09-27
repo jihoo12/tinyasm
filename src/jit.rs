@@ -201,7 +201,7 @@ impl JitMemory {
         // SAFETY: addr is a non-null, page-aligned pointer to at least
         // `self.written` bytes of RX memory.  The caller is responsible for
         // ABI correctness.
-        Ok(std::mem::transmute(self.addr))
+        Ok(unsafe { std::mem::transmute(self.addr) })
     }
 
     /// Returns the OS page size in bytes.
