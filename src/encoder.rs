@@ -176,22 +176,33 @@ impl fmt::Display for Instruction {
 // ModR/M + SIB encoding for memory operands
 // ---------------------------------------------------------------------------
 
-fn push_displacement(disp: i32, size: usize, bytes: &mut Vec<u8>) {
-    match size {
-        1 => bytes.push(disp as u8),
-        4 => bytes.extend_from_slice(&disp.to_le_bytes()),
-        _ => {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EncodedMemory {
+    modrm: u8,
+    sib: Option<u8>,
+    disp: i32,
+    disp_size: usize,
+    rex_b: bool,
+    rex_x: bool,
+}
+
+impl EncodedMemory {
+    fn emit(self, bytes: &mut Vec<u8>) {
+        bytes.push(self.modrm);
+        if let Some(sib) = self.sib {
+            bytes.push(sib);
+        }
+        match self.disp_size {
+            1 => bytes.push(self.disp as u8),
+            4 => bytes.extend_from_slice(&self.disp.to_le_bytes()),
+            _ => {}
+        }
     }
 }
 
-/// Returns `(modrm, sib, disp_size, rex_b, rex_x)` for a memory operand.
-///
-/// `reg_field` is the 3-bit value that goes into ModR/M's `reg` slot
-/// (either a register code or an opcode extension).
-fn encode_mem_parts(
-    reg_field: u8,
-    mem: MemoryAddr,
-) -> Result<(u8, Option<u8>, usize, bool, bool), EncodeError> {
+/// Encode the ModR/M, optional SIB, displacement, and REX extension bits for
+/// a memory operand. `reg_field` is either a register code or opcode extension.
+fn encode_memory(reg_field: u8, mem: MemoryAddr) -> Result<EncodedMemory, EncodeError> {
     // Choose mod bits and displacement size.
     let (mod_bits, disp_size) = if let Some(base) = mem.base {
         // RBP/R13 with mod=00 would be interpreted as RIP-relative, so force
@@ -242,7 +253,7 @@ fn encode_mem_parts(
         None
     };
 
-    Ok((modrm, sib, disp_size, rex_b, rex_x))
+    Ok(EncodedMemory { modrm, sib, disp: mem.disp, disp_size, rex_b, rex_x })
 }
 
 // ---------------------------------------------------------------------------
@@ -330,21 +341,17 @@ fn encode_mov(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), Enc
         }
         // MOV r64, [mem]  →  REX.W 8B /r
         (Operand::Reg(dst_r), Operand::Mem(mem)) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(dst_r.code(), mem)?;
-            bytes.push(rex_w(dst_r.is_extended(), rex_x, rex_b));
+            let encoded = encode_memory(dst_r.code(), mem)?;
+            bytes.push(rex_w(dst_r.is_extended(), encoded.rex_x, encoded.rex_b));
             bytes.push(0x8B);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         // MOV [mem], r64  →  REX.W 89 /r
         (Operand::Mem(mem), Operand::Reg(src_r)) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(src_r.code(), mem)?;
-            bytes.push(rex_w(src_r.is_extended(), rex_x, rex_b));
+            let encoded = encode_memory(src_r.code(), mem)?;
+            bytes.push(rex_w(src_r.is_extended(), encoded.rex_x, encoded.rex_b));
             bytes.push(0x89);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         _ => return Err(EncodeError::UnsupportedOperand(
             "MOV: unsupported operand combination".into()
@@ -376,12 +383,10 @@ fn encode_push(op: Operand, bytes: &mut Vec<u8>) -> Result<(), EncodeError> {
         }
         // PUSH [mem]  →  REX.W FF /6
         Operand::Mem(mem) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(6, mem)?;
-            bytes.push(rex_w(false, rex_x, rex_b));
+            let encoded = encode_memory(6, mem)?;
+            bytes.push(rex_w(false, encoded.rex_x, encoded.rex_b));
             bytes.push(0xFF);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         _ => return Err(EncodeError::UnsupportedOperand("PUSH: unsupported operand".into())),
     }
@@ -397,12 +402,10 @@ fn encode_pop(op: Operand, bytes: &mut Vec<u8>) -> Result<(), EncodeError> {
         }
         // POP [mem]  →  REX.W 8F /0
         Operand::Mem(mem) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(0, mem)?;
-            bytes.push(rex_w(false, rex_x, rex_b));
+            let encoded = encode_memory(0, mem)?;
+            bytes.push(rex_w(false, encoded.rex_x, encoded.rex_b));
             bytes.push(0x8F);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         _ => return Err(EncodeError::UnsupportedOperand("POP: unsupported operand".into())),
     }
@@ -422,12 +425,10 @@ fn encode_imul(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), En
             bytes.push(modrm(0b11, dst_r.code(), src_r.code()));
         }
         (Operand::Reg(dst_r), Operand::Mem(mem)) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(dst_r.code(), mem)?;
-            bytes.push(rex_w(dst_r.is_extended(), rex_x, rex_b));
+            let encoded = encode_memory(dst_r.code(), mem)?;
+            bytes.push(rex_w(dst_r.is_extended(), encoded.rex_x, encoded.rex_b));
             bytes.extend_from_slice(&[0x0F, 0xAF]);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         // IMUL r64, r/m64, imm8  →  REX.W 6B /r ib
         (Operand::Reg(dst_r), Operand::Imm32(imm)) if (-128..=127).contains(&imm) => {
@@ -465,12 +466,10 @@ fn encode_call(op: Operand, bytes: &mut Vec<u8>) -> Result<(), EncodeError> {
         }
         // CALL [mem]  →  REX.W FF /2
         Operand::Mem(mem) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(2, mem)?;
-            bytes.push(rex_w(false, rex_x, rex_b));
+            let encoded = encode_memory(2, mem)?;
+            bytes.push(rex_w(false, encoded.rex_x, encoded.rex_b));
             bytes.push(0xFF);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         _ => return Err(EncodeError::UnsupportedOperand(
             "CALL: operand must be a register or memory".into()
@@ -505,21 +504,17 @@ fn encode_arithmetic(
         }
         // op r64, [mem]
         (Operand::Reg(dst_r), Operand::Mem(mem)) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(dst_r.code(), mem)?;
-            bytes.push(rex_w(dst_r.is_extended(), rex_x, rex_b));
+            let encoded = encode_memory(dst_r.code(), mem)?;
+            bytes.push(rex_w(dst_r.is_extended(), encoded.rex_x, encoded.rex_b));
             bytes.push(op_rm);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         // op [mem], r64
         (Operand::Mem(mem), Operand::Reg(src_r)) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(src_r.code(), mem)?;
-            bytes.push(rex_w(src_r.is_extended(), rex_x, rex_b));
+            let encoded = encode_memory(src_r.code(), mem)?;
+            bytes.push(rex_w(src_r.is_extended(), encoded.rex_x, encoded.rex_b));
             bytes.push(op_mr);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         // op r/m64, imm8 (sign-extended) or imm32
         (dst, Operand::Imm32(imm)) => {
@@ -535,12 +530,10 @@ fn encode_arithmetic(
                     bytes.push(modrm(0b11, ext_idx, r.code()));
                 }
                 Operand::Mem(mem) => {
-                    let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(ext_idx, mem)?;
-                    bytes.push(rex_w(false, rex_x, rex_b));
+                    let encoded = encode_memory(ext_idx, mem)?;
+                    bytes.push(rex_w(false, encoded.rex_x, encoded.rex_b));
                     bytes.push(opcode);
-                    bytes.push(modrm);
-                    if let Some(s) = sib { bytes.push(s); }
-                    push_displacement(mem.disp, disp_sz, bytes);
+                    encoded.emit(bytes);
                 }
                 _ => return Err(EncodeError::UnsupportedOperand(
                     "Arithmetic Imm: destination must be register or memory".into()
@@ -607,12 +600,10 @@ fn encode_shift(
             bytes.push(modrm(0b11, ext_idx, r.code()));
         }
         Operand::Mem(mem) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(ext_idx, mem)?;
-            bytes.push(rex_w(false, rex_x, rex_b));
+            let encoded = encode_memory(ext_idx, mem)?;
+            bytes.push(rex_w(false, encoded.rex_x, encoded.rex_b));
             bytes.push(opcode);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         _ => return Err(EncodeError::UnsupportedOperand("Shift dst must be register or memory".into())),
     }
@@ -637,12 +628,10 @@ fn encode_unary(opcode: u8, ext_idx: u8, op: Operand, bytes: &mut Vec<u8>) -> Re
             bytes.push(modrm(0b11, ext_idx, r.code()));
         }
         Operand::Mem(mem) => {
-            let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(ext_idx, mem)?;
-            bytes.push(rex_w(false, rex_x, rex_b));
+            let encoded = encode_memory(ext_idx, mem)?;
+            bytes.push(rex_w(false, encoded.rex_x, encoded.rex_b));
             bytes.push(opcode);
-            bytes.push(modrm);
-            if let Some(s) = sib { bytes.push(s); }
-            push_displacement(mem.disp, disp_sz, bytes);
+            encoded.emit(bytes);
         }
         _ => return Err(EncodeError::UnsupportedOperand("Unary: operand must be register or memory".into())),
     }
