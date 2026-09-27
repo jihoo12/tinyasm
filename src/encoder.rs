@@ -1,3 +1,4 @@
+use crate::encoding::{modrm, rex_w, sib};
 use crate::registers::Register;
 use std::fmt;
 
@@ -172,22 +173,6 @@ impl fmt::Display for Instruction {
 }
 
 // ---------------------------------------------------------------------------
-// REX prefix helpers
-// ---------------------------------------------------------------------------
-
-/// Builds a REX.W prefix byte.
-///
-/// Bit layout: `0100 WRXB`
-/// - W = 1 → 64-bit operand size (always set here)
-/// - R = 1 → ModR/M `reg` field is R8–R15
-/// - X = 1 → SIB `index` field is R8–R15
-/// - B = 1 → ModR/M `rm` / opcode-embedded register is R8–R15
-#[inline]
-fn rex_w(r: bool, x: bool, b: bool) -> u8 {
-    0x48 | ((r as u8) << 2) | ((x as u8) << 1) | (b as u8)
-}
-
-// ---------------------------------------------------------------------------
 // ModR/M + SIB encoding for memory operands
 // ---------------------------------------------------------------------------
 
@@ -240,7 +225,7 @@ fn encode_mem_parts(
             .code()
     };
 
-    let modrm = (mod_bits << 6) | (reg_field << 3) | rm_bits;
+    let modrm = modrm(mod_bits, reg_field, rm_bits);
     let rex_b = mem.base.is_some_and(|r| r.is_extended());
     let rex_x = mem.index.is_some_and(|r| r.is_extended());
 
@@ -252,7 +237,7 @@ fn encode_mem_parts(
         // No index → encode index field as 0b100 (no-index sentinel).
         let index_bits = mem.index.map(|r| r.code()).unwrap_or(0x04);
         let base_bits  = mem.base.map(|r| r.code()).unwrap_or(0x05);
-        Some((scale_bits << 6) | (index_bits << 3) | base_bits)
+        Some(sib(scale_bits, index_bits, base_bits))
     } else {
         None
     };
@@ -333,7 +318,7 @@ fn encode_mov(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), Enc
         (Operand::Reg(r), Operand::Imm32(imm)) => {
             bytes.push(rex_w(false, false, r.is_extended()));
             bytes.push(0xC7);
-            bytes.push(0xC0 | r.code());
+            bytes.push(modrm(0b11, 0, r.code()));
             bytes.extend_from_slice(&imm.to_le_bytes());
         }
         // MOV r64, r64  →  REX.W 89 /r   (opcode 89: MOV r/m64, r64)
@@ -341,7 +326,7 @@ fn encode_mov(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), Enc
         (Operand::Reg(dst_r), Operand::Reg(src_r)) => {
             bytes.push(rex_w(src_r.is_extended(), false, dst_r.is_extended()));
             bytes.push(0x89);
-            bytes.push(0xC0 | (src_r.code() << 3) | dst_r.code());
+            bytes.push(modrm(0b11, src_r.code(), dst_r.code()));
         }
         // MOV r64, [mem]  →  REX.W 8B /r
         (Operand::Reg(dst_r), Operand::Mem(mem)) => {
@@ -434,7 +419,7 @@ fn encode_imul(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), En
         (Operand::Reg(dst_r), Operand::Reg(src_r)) => {
             bytes.push(rex_w(dst_r.is_extended(), false, src_r.is_extended()));
             bytes.extend_from_slice(&[0x0F, 0xAF]);
-            bytes.push(0xC0 | (dst_r.code() << 3) | src_r.code());
+            bytes.push(modrm(0b11, dst_r.code(), src_r.code()));
         }
         (Operand::Reg(dst_r), Operand::Mem(mem)) => {
             let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(dst_r.code(), mem)?;
@@ -449,14 +434,14 @@ fn encode_imul(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), En
             bytes.push(rex_w(dst_r.is_extended(), false, false));
             bytes.push(0x6B);
             // Self-multiply: dst = dst * imm  (src same as dst in ModR/M)
-            bytes.push(0xC0 | (dst_r.code() << 3) | dst_r.code());
+            bytes.push(modrm(0b11, dst_r.code(), dst_r.code()));
             bytes.push(imm as u8);
         }
         // IMUL r64, r/m64, imm32  →  REX.W 69 /r id
         (Operand::Reg(dst_r), Operand::Imm32(imm)) => {
             bytes.push(rex_w(dst_r.is_extended(), false, false));
             bytes.push(0x69);
-            bytes.push(0xC0 | (dst_r.code() << 3) | dst_r.code());
+            bytes.push(modrm(0b11, dst_r.code(), dst_r.code()));
             bytes.extend_from_slice(&imm.to_le_bytes());
         }
         _ => return Err(EncodeError::UnsupportedOperand(
@@ -476,7 +461,7 @@ fn encode_call(op: Operand, bytes: &mut Vec<u8>) -> Result<(), EncodeError> {
         Operand::Reg(r) => {
             if r.is_extended() { bytes.push(0x41); }
             bytes.push(0xFF);
-            bytes.push(0xD0 | r.code()); // ModR/M: mod=11, reg=2, rm=r
+            bytes.push(modrm(0b11, 2, r.code())); // ModR/M: mod=11, reg=2, rm=r
         }
         // CALL [mem]  →  REX.W FF /2
         Operand::Mem(mem) => {
@@ -516,7 +501,7 @@ fn encode_arithmetic(
         (Operand::Reg(dst_r), Operand::Reg(src_r)) => {
             bytes.push(rex_w(src_r.is_extended(), false, dst_r.is_extended()));
             bytes.push(op_mr);
-            bytes.push(0xC0 | (src_r.code() << 3) | dst_r.code());
+            bytes.push(modrm(0b11, src_r.code(), dst_r.code()));
         }
         // op r64, [mem]
         (Operand::Reg(dst_r), Operand::Mem(mem)) => {
@@ -547,7 +532,7 @@ fn encode_arithmetic(
                 Operand::Reg(r) => {
                     bytes.push(rex_w(false, false, r.is_extended()));
                     bytes.push(opcode);
-                    bytes.push(0xC0 | (ext_idx << 3) | r.code());
+                    bytes.push(modrm(0b11, ext_idx, r.code()));
                 }
                 Operand::Mem(mem) => {
                     let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(ext_idx, mem)?;
@@ -582,13 +567,13 @@ fn encode_test(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), En
         (Operand::Reg(dst_r), Operand::Reg(src_r)) => {
             bytes.push(rex_w(src_r.is_extended(), false, dst_r.is_extended()));
             bytes.push(0x85);
-            bytes.push(0xC0 | (src_r.code() << 3) | dst_r.code());
+            bytes.push(modrm(0b11, src_r.code(), dst_r.code()));
         }
         // TEST r/m64, imm32  →  REX.W F7 /0 id
         (Operand::Reg(r), Operand::Imm32(imm)) => {
             bytes.push(rex_w(false, false, r.is_extended()));
             bytes.push(0xF7);
-            bytes.push(0xC0 | r.code()); // /0
+            bytes.push(modrm(0b11, 0, r.code())); // /0
             bytes.extend_from_slice(&imm.to_le_bytes());
         }
         _ => return Err(EncodeError::UnsupportedOperand("TEST: unsupported operands".into())),
@@ -619,7 +604,7 @@ fn encode_shift(
         Operand::Reg(r) => {
             bytes.push(rex_w(false, false, r.is_extended()));
             bytes.push(opcode);
-            bytes.push(0xC0 | (ext_idx << 3) | r.code());
+            bytes.push(modrm(0b11, ext_idx, r.code()));
         }
         Operand::Mem(mem) => {
             let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(ext_idx, mem)?;
@@ -649,7 +634,7 @@ fn encode_unary(opcode: u8, ext_idx: u8, op: Operand, bytes: &mut Vec<u8>) -> Re
         Operand::Reg(r) => {
             bytes.push(rex_w(false, false, r.is_extended()));
             bytes.push(opcode);
-            bytes.push(0xC0 | (ext_idx << 3) | r.code());
+            bytes.push(modrm(0b11, ext_idx, r.code()));
         }
         Operand::Mem(mem) => {
             let (modrm, sib, disp_sz, rex_b, rex_x) = encode_mem_parts(ext_idx, mem)?;
