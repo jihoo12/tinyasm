@@ -1,12 +1,5 @@
-mod registers;
-mod encoder;
-mod assembler;
-mod jit;
-
-use crate::registers::Register::*;
-use crate::encoder::{Instruction, Operand};
-use crate::assembler::Assembler;
-use crate::jit::JitMemory;
+use tinyasm::registers::Register::*;
+use tinyasm::{Assembler, Instruction, JitMemory, Operand};
 
 fn main() {
     // -----------------------------------------------------------------------
@@ -48,5 +41,7 @@ fn main() {
     jit.make_executable().unwrap();
 
     // Call the JIT-compiled function.
-    let result = unsafe { jit.as_fn() };
+    let func = unsafe { jit.as_fn() }.unwrap();
+    let result = func();
+    println!("JIT result: {}", result);
 }
