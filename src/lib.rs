@@ -1,4 +1,5 @@
 pub mod registers;
+mod encoding;
 pub mod encoder;
 pub mod assembler;
 pub mod jit;
