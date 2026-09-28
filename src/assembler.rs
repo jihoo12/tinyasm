@@ -221,3 +221,79 @@ impl Default for Assembler {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoder::Operand;
+    use crate::registers::Register::RAX;
+
+    #[test]
+    fn resolves_forward_jump() {
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::JmpLabel("done".into()));
+        asm.add_instruction(Instruction::Mov(Operand::Reg(RAX), Operand::Imm32(1)));
+        asm.add_instruction(Instruction::Label("done".into()));
+        asm.add_instruction(Instruction::Ret);
+
+        assert_eq!(
+            asm.assemble().unwrap(),
+            vec![0xE9, 0x07, 0, 0, 0, 0x48, 0xC7, 0xC0, 1, 0, 0, 0, 0xC3]
+        );
+    }
+
+    #[test]
+    fn resolves_backward_conditional_jump() {
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::Label("loop".into()));
+        asm.add_instruction(Instruction::Add(Operand::Reg(RAX), Operand::Imm32(1)));
+        asm.add_instruction(Instruction::JneLabel("loop".into()));
+
+        assert_eq!(
+            asm.assemble().unwrap(),
+            vec![0x48, 0x83, 0xC0, 1, 0x0F, 0x85, 0xF6, 0xFF, 0xFF, 0xFF]
+        );
+    }
+
+    #[test]
+    fn conditional_jump_opcodes_are_stable() {
+        let cases: [(fn(String) -> Instruction, u8); 6] = [
+            (Instruction::JeLabel, 0x84),
+            (Instruction::JneLabel, 0x85),
+            (Instruction::JlLabel, 0x8C),
+            (Instruction::JleLabel, 0x8E),
+            (Instruction::JgeLabel, 0x8D),
+            (Instruction::JgLabel, 0x8F),
+        ];
+
+        for (make_jump, opcode) in cases {
+            let mut asm = Assembler::new();
+            asm.add_instruction(make_jump("target".into()));
+            asm.add_instruction(Instruction::Label("target".into()));
+            assert_eq!(asm.assemble().unwrap(), vec![0x0F, opcode, 0, 0, 0, 0]);
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_label() {
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::Label("same".into()));
+        asm.add_instruction(Instruction::Label("same".into()));
+
+        assert!(matches!(
+            asm.assemble(),
+            Err(EncodeError::Other(msg)) if msg.contains("Duplicate label")
+        ));
+    }
+
+    #[test]
+    fn rejects_undefined_label() {
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::JmpLabel("missing".into()));
+
+        assert!(matches!(
+            asm.assemble(),
+            Err(EncodeError::Other(msg)) if msg.contains("Undefined label")
+        ));
+    }
+}
