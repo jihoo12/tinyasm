@@ -145,6 +145,7 @@ pub enum Instruction {
     JgeLabel(String),
     JgLabel(String),
     JaLabel(String),
+    JpLabel(String),
 }
 
 impl fmt::Display for Instruction {
@@ -184,6 +185,7 @@ impl fmt::Display for Instruction {
             Instruction::JgeLabel(t)   => write!(f, "jge {}", t),
             Instruction::JgLabel(t)    => write!(f, "jg {}", t),
             Instruction::JaLabel(t)    => write!(f, "ja {}", t),
+            Instruction::JpLabel(t)    => write!(f, "jp {}", t),
         }
     }
 }
@@ -327,7 +329,8 @@ pub fn encode_instruction(instr: Instruction) -> Result<Vec<u8>, EncodeError> {
         | Instruction::JleLabel(_)
         | Instruction::JgeLabel(_)
         | Instruction::JgLabel(_)
-        | Instruction::JaLabel(_) => {
+        | Instruction::JaLabel(_)
+        | Instruction::JpLabel(_) => {
             return Err(EncodeError::Other(
                 "Label/jump instructions must be handled by Assembler, not Encoder".into(),
             ));
