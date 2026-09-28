@@ -107,6 +107,7 @@ pub enum Instruction {
     Subsd(Operand, Operand),
     Mulsd(Operand, Operand),
     Divsd(Operand, Operand),
+    Ucomisd(Operand, Operand),
     Push(Operand),
     Pop(Operand),
 
@@ -143,6 +144,7 @@ pub enum Instruction {
     JleLabel(String),
     JgeLabel(String),
     JgLabel(String),
+    JaLabel(String),
 }
 
 impl fmt::Display for Instruction {
@@ -154,6 +156,7 @@ impl fmt::Display for Instruction {
             Instruction::Subsd(d, s)   => write!(f, "subsd {}, {}", d, s),
             Instruction::Mulsd(d, s)   => write!(f, "mulsd {}, {}", d, s),
             Instruction::Divsd(d, s)   => write!(f, "divsd {}, {}", d, s),
+            Instruction::Ucomisd(d, s) => write!(f, "ucomisd {}, {}", d, s),
             Instruction::Push(o)       => write!(f, "push {}", o),
             Instruction::Pop(o)        => write!(f, "pop {}", o),
             Instruction::Add(d, s)     => write!(f, "add {}, {}", d, s),
@@ -180,6 +183,7 @@ impl fmt::Display for Instruction {
             Instruction::JleLabel(t)   => write!(f, "jle {}", t),
             Instruction::JgeLabel(t)   => write!(f, "jge {}", t),
             Instruction::JgLabel(t)    => write!(f, "jg {}", t),
+            Instruction::JaLabel(t)    => write!(f, "ja {}", t),
         }
     }
 }
@@ -286,6 +290,7 @@ pub fn encode_instruction(instr: Instruction) -> Result<Vec<u8>, EncodeError> {
         Instruction::Subsd(dst, src) => encode_scalar_sse2(0x5C, "SUBSD", dst, src, &mut bytes)?,
         Instruction::Mulsd(dst, src) => encode_scalar_sse2(0x59, "MULSD", dst, src, &mut bytes)?,
         Instruction::Divsd(dst, src) => encode_scalar_sse2(0x5E, "DIVSD", dst, src, &mut bytes)?,
+        Instruction::Ucomisd(lhs, rhs) => encode_ucomisd(lhs, rhs, &mut bytes)?,
         Instruction::Push(op)       => encode_push(op, &mut bytes)?,
         Instruction::Pop(op)        => encode_pop(op, &mut bytes)?,
 
@@ -451,6 +456,38 @@ fn encode_scalar_sse2(
         }
         _ => return Err(EncodeError::UnsupportedOperand(
             format!("{}: source must be an XMM register or memory", name)
+        )),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SSE2 compare
+// ---------------------------------------------------------------------------
+
+fn encode_ucomisd(lhs: Operand, rhs: Operand, bytes: &mut Vec<u8>) -> Result<(), EncodeError> {
+    let lhs_r = match lhs {
+        Operand::Xmm(r) => r,
+        _ => return Err(EncodeError::UnsupportedOperand(
+            "UCOMISD: left operand must be an XMM register".into()
+        )),
+    };
+
+    bytes.push(0x66);
+    match rhs {
+        Operand::Xmm(rhs_r) => {
+            emit_optional_rex(lhs_r.is_extended(), false, rhs_r.is_extended(), bytes);
+            bytes.extend_from_slice(&[0x0F, 0x2E]);
+            bytes.push(modrm(0b11, lhs_r.code(), rhs_r.code()));
+        }
+        Operand::Mem(mem) => {
+            let encoded = encode_memory(lhs_r.code(), mem)?;
+            emit_optional_rex(lhs_r.is_extended(), encoded.rex_x, encoded.rex_b, bytes);
+            bytes.extend_from_slice(&[0x0F, 0x2E]);
+            encoded.emit(bytes);
+        }
+        _ => return Err(EncodeError::UnsupportedOperand(
+            "UCOMISD: right operand must be an XMM register or memory".into()
         )),
     }
     Ok(())
@@ -847,6 +884,17 @@ mod tests {
             encode_instruction(Instruction::Addsd(Operand::Xmm(XMM0), Operand::Imm32(1))),
             Err(EncodeError::UnsupportedOperand(_))
         ));
+    }
+
+    #[test]
+    fn ucomisd_encodes_register_and_memory_forms() {
+        use crate::registers::XmmRegister::*;
+
+        assert_eq!(enc(Instruction::Ucomisd(Operand::Xmm(XMM0), Operand::Xmm(XMM1))), vec![0x66, 0x0F, 0x2E, 0xC1]);
+        assert_eq!(enc(Instruction::Ucomisd(Operand::Xmm(XMM10), Operand::Xmm(XMM9))), vec![0x66, 0x45, 0x0F, 0x2E, 0xD1]);
+
+        let mem = MemoryAddr::base_disp(R12, 16);
+        assert_eq!(enc(Instruction::Ucomisd(Operand::Xmm(XMM8), Operand::Mem(mem))), vec![0x66, 0x45, 0x0F, 0x2E, 0x44, 0x24, 0x10]);
     }
 
     #[test]
