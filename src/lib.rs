@@ -6,5 +6,5 @@ pub mod jit;
 
 pub use assembler::Assembler;
 pub use encoder::{Instruction, Operand, MemoryAddr, EncodeError};
-pub use jit::JitMemory;
+pub use jit::{JitFunction, JitMemory};
 pub use registers::{Register, XmmRegister};
