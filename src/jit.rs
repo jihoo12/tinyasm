@@ -322,6 +322,37 @@ mod tests {
     }
 
     #[test]
+    fn executes_assembled_f64_compare_and_branch() {
+        use crate::{Assembler, Instruction, Operand, XmmRegister};
+
+        // Return max(a, b) for ordered finite inputs.
+        // ucomisd xmm0, xmm1; ja done; movsd xmm0, xmm1; done: ret
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::Ucomisd(
+            Operand::Xmm(XmmRegister::XMM0),
+            Operand::Xmm(XmmRegister::XMM1),
+        ));
+        asm.add_instruction(Instruction::JaLabel("done".into()));
+        asm.add_instruction(Instruction::Movsd(
+            Operand::Xmm(XmmRegister::XMM0),
+            Operand::Xmm(XmmRegister::XMM1),
+        ));
+        asm.add_instruction(Instruction::Label("done".into()));
+        asm.add_instruction(Instruction::Ret);
+        let code = asm.assemble().unwrap();
+
+        let mut jit = JitMemory::new(code.len()).unwrap();
+        jit.write(&code).unwrap();
+        jit.make_executable().unwrap();
+
+        let func: extern "C" fn(f64, f64) -> f64 =
+            unsafe { jit.as_typed_fn() }.unwrap();
+        assert_eq!(func(4.5, 2.0), 4.5);
+        assert_eq!(func(1.25, 3.75), 3.75);
+        assert_eq!(func(2.0, 2.0), 2.0);
+    }
+
+    #[test]
     fn executes_assembled_sse2_function() {
         use crate::{Assembler, Instruction, Operand, XmmRegister};
 
