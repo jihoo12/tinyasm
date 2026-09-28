@@ -149,6 +149,12 @@ impl Assembler {
                     self.debug_bytes(&bytes);
                     out.extend(bytes);
                 }
+                Instruction::JpLabel(target) => {
+                    // 0F 8A rel32  (6 bytes) — parity set; UCOMISD uses PF=1 for unordered.
+                    let bytes = self.encode_rel32_jump(&[0x0F, 0x8A], target, offset, 6)?;
+                    self.debug_bytes(&bytes);
+                    out.extend(bytes);
+                }
 
                 other => {
                     let bytes = encode_instruction(other.clone())?;
@@ -210,7 +216,8 @@ impl Assembler {
             | Instruction::JleLabel(_)
             | Instruction::JgeLabel(_)
             | Instruction::JgLabel(_)
-            | Instruction::JaLabel(_) => Ok(6),
+            | Instruction::JaLabel(_)
+            | Instruction::JpLabel(_) => Ok(6),
             other => encode_instruction(other.clone()).map(|b| b.len()),
         }
     }
