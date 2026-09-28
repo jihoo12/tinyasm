@@ -322,6 +322,35 @@ mod tests {
     }
 
     #[test]
+    fn executes_assembled_f64_unordered_nan_branch() {
+        use crate::{Assembler, Instruction, Operand, Register, XmmRegister};
+
+        // Return 1 when either operand is NaN (unordered), otherwise 0.
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::Ucomisd(
+            Operand::Xmm(XmmRegister::XMM0),
+            Operand::Xmm(XmmRegister::XMM1),
+        ));
+        asm.add_instruction(Instruction::JpLabel("unordered".into()));
+        asm.add_instruction(Instruction::Mov(Operand::Reg(Register::RAX), Operand::Imm32(0)));
+        asm.add_instruction(Instruction::Ret);
+        asm.add_instruction(Instruction::Label("unordered".into()));
+        asm.add_instruction(Instruction::Mov(Operand::Reg(Register::RAX), Operand::Imm32(1)));
+        asm.add_instruction(Instruction::Ret);
+        let code = asm.assemble().unwrap();
+
+        let mut jit = JitMemory::new(code.len()).unwrap();
+        jit.write(&code).unwrap();
+        jit.make_executable().unwrap();
+
+        let func: extern "C" fn(f64, f64) -> u64 =
+            unsafe { jit.as_typed_fn() }.unwrap();
+        assert_eq!(func(1.0, 2.0), 0);
+        assert_eq!(func(f64::NAN, 2.0), 1);
+        assert_eq!(func(1.0, f64::NAN), 1);
+    }
+
+    #[test]
     fn executes_assembled_f64_compare_and_branch() {
         use crate::{Assembler, Instruction, Operand, XmmRegister};
 
