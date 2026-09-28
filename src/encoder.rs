@@ -326,7 +326,8 @@ pub fn encode_instruction(instr: Instruction) -> Result<Vec<u8>, EncodeError> {
         | Instruction::JlLabel(_)
         | Instruction::JleLabel(_)
         | Instruction::JgeLabel(_)
-        | Instruction::JgLabel(_) => {
+        | Instruction::JgLabel(_)
+        | Instruction::JaLabel(_) => {
             return Err(EncodeError::Other(
                 "Label/jump instructions must be handled by Assembler, not Encoder".into(),
             ));
@@ -895,6 +896,14 @@ mod tests {
 
         let mem = MemoryAddr::base_disp(R12, 16);
         assert_eq!(enc(Instruction::Ucomisd(Operand::Xmm(XMM8), Operand::Mem(mem))), vec![0x66, 0x45, 0x0F, 0x2E, 0x44, 0x24, 0x10]);
+    }
+
+    #[test]
+    fn direct_label_jumps_are_rejected_by_encoder() {
+        assert!(matches!(
+            encode_instruction(Instruction::JaLabel("target".into())),
+            Err(EncodeError::Other(_))
+        ));
     }
 
     #[test]
