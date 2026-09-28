@@ -103,6 +103,10 @@ pub enum Instruction {
     // Data movement
     Mov(Operand, Operand),
     Movsd(Operand, Operand),
+    Addsd(Operand, Operand),
+    Subsd(Operand, Operand),
+    Mulsd(Operand, Operand),
+    Divsd(Operand, Operand),
     Push(Operand),
     Pop(Operand),
 
@@ -146,6 +150,10 @@ impl fmt::Display for Instruction {
         match self {
             Instruction::Mov(d, s)     => write!(f, "mov {}, {}", d, s),
             Instruction::Movsd(d, s)   => write!(f, "movsd {}, {}", d, s),
+            Instruction::Addsd(d, s)   => write!(f, "addsd {}, {}", d, s),
+            Instruction::Subsd(d, s)   => write!(f, "subsd {}, {}", d, s),
+            Instruction::Mulsd(d, s)   => write!(f, "mulsd {}, {}", d, s),
+            Instruction::Divsd(d, s)   => write!(f, "divsd {}, {}", d, s),
             Instruction::Push(o)       => write!(f, "push {}", o),
             Instruction::Pop(o)        => write!(f, "pop {}", o),
             Instruction::Add(d, s)     => write!(f, "add {}, {}", d, s),
@@ -274,6 +282,10 @@ pub fn encode_instruction(instr: Instruction) -> Result<Vec<u8>, EncodeError> {
         // Data movement
         Instruction::Mov(dst, src)  => encode_mov(dst, src, &mut bytes)?,
         Instruction::Movsd(dst, src) => encode_movsd(dst, src, &mut bytes)?,
+        Instruction::Addsd(dst, src) => encode_scalar_sse2(0x58, "ADDSD", dst, src, &mut bytes)?,
+        Instruction::Subsd(dst, src) => encode_scalar_sse2(0x5C, "SUBSD", dst, src, &mut bytes)?,
+        Instruction::Mulsd(dst, src) => encode_scalar_sse2(0x59, "MULSD", dst, src, &mut bytes)?,
+        Instruction::Divsd(dst, src) => encode_scalar_sse2(0x5E, "DIVSD", dst, src, &mut bytes)?,
         Instruction::Push(op)       => encode_push(op, &mut bytes)?,
         Instruction::Pop(op)        => encode_pop(op, &mut bytes)?,
 
@@ -401,6 +413,44 @@ fn encode_movsd(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), E
         }
         _ => return Err(EncodeError::UnsupportedOperand(
             "MOVSD: expected xmm/xmm or xmm/memory operands".into()
+        )),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Scalar SSE2 arithmetic
+// ---------------------------------------------------------------------------
+
+fn encode_scalar_sse2(
+    opcode: u8,
+    name: &str,
+    dst: Operand,
+    src: Operand,
+    bytes: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    let dst_r = match dst {
+        Operand::Xmm(r) => r,
+        _ => return Err(EncodeError::UnsupportedOperand(
+            format!("{}: destination must be an XMM register", name)
+        )),
+    };
+
+    bytes.push(0xF2);
+    match src {
+        Operand::Xmm(src_r) => {
+            emit_optional_rex(dst_r.is_extended(), false, src_r.is_extended(), bytes);
+            bytes.extend_from_slice(&[0x0F, opcode]);
+            bytes.push(modrm(0b11, dst_r.code(), src_r.code()));
+        }
+        Operand::Mem(mem) => {
+            let encoded = encode_memory(dst_r.code(), mem)?;
+            emit_optional_rex(dst_r.is_extended(), encoded.rex_x, encoded.rex_b, bytes);
+            bytes.extend_from_slice(&[0x0F, opcode]);
+            encoded.emit(bytes);
+        }
+        _ => return Err(EncodeError::UnsupportedOperand(
+            format!("{}: source must be an XMM register or memory", name)
         )),
     }
     Ok(())
@@ -762,6 +812,41 @@ mod tests {
 
         let store = MemoryAddr::base_disp(R13, 0);
         assert_eq!(enc(Instruction::Movsd(Operand::Mem(store), Operand::Xmm(XMM15))), vec![0xF2, 0x45, 0x0F, 0x11, 0x7D, 0x00]);
+    }
+
+    #[test]
+    fn scalar_sse2_arithmetic_encodes_register_forms() {
+        use crate::registers::XmmRegister::*;
+
+        assert_eq!(enc(Instruction::Addsd(Operand::Xmm(XMM0), Operand::Xmm(XMM1))), vec![0xF2, 0x0F, 0x58, 0xC1]);
+        assert_eq!(enc(Instruction::Mulsd(Operand::Xmm(XMM8), Operand::Xmm(XMM9))), vec![0xF2, 0x45, 0x0F, 0x59, 0xC1]);
+        assert_eq!(enc(Instruction::Subsd(Operand::Xmm(XMM2), Operand::Xmm(XMM3))), vec![0xF2, 0x0F, 0x5C, 0xD3]);
+        assert_eq!(enc(Instruction::Divsd(Operand::Xmm(XMM15), Operand::Xmm(XMM14))), vec![0xF2, 0x45, 0x0F, 0x5E, 0xFE]);
+    }
+
+    #[test]
+    fn scalar_sse2_arithmetic_encodes_memory_forms() {
+        use crate::registers::XmmRegister::*;
+
+        let simple = MemoryAddr::base_disp(RAX, 8);
+        assert_eq!(enc(Instruction::Addsd(Operand::Xmm(XMM1), Operand::Mem(simple))), vec![0xF2, 0x0F, 0x58, 0x48, 0x08]);
+
+        let extended = MemoryAddr { base: Some(R12), index: Some(R9), scale: 8, disp: 32 };
+        assert_eq!(enc(Instruction::Divsd(Operand::Xmm(XMM10), Operand::Mem(extended))), vec![0xF2, 0x47, 0x0F, 0x5E, 0x54, 0xCC, 0x20]);
+    }
+
+    #[test]
+    fn scalar_sse2_arithmetic_rejects_invalid_operands() {
+        use crate::registers::XmmRegister::XMM0;
+
+        assert!(matches!(
+            encode_instruction(Instruction::Addsd(Operand::Reg(RAX), Operand::Xmm(XMM0))),
+            Err(EncodeError::UnsupportedOperand(_))
+        ));
+        assert!(matches!(
+            encode_instruction(Instruction::Addsd(Operand::Xmm(XMM0), Operand::Imm32(1))),
+            Err(EncodeError::UnsupportedOperand(_))
+        ));
     }
 
     #[test]
