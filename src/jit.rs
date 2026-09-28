@@ -232,3 +232,59 @@ impl Drop for JitMemory {
         }
     }
 }
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_zero_sized_region() {
+        assert!(JitMemory::new(0).is_err());
+    }
+
+    #[test]
+    fn function_pointer_requires_executable_memory() {
+        let mut jit = JitMemory::new(1).unwrap();
+        jit.write(&[0xC3]).unwrap();
+
+        assert!(unsafe { jit.as_fn() }.is_err());
+    }
+
+    #[test]
+    fn empty_executable_region_cannot_be_called() {
+        let mut jit = JitMemory::new(1).unwrap();
+        jit.make_executable().unwrap();
+
+        assert!(unsafe { jit.as_fn() }.is_err());
+    }
+
+    #[test]
+    fn write_is_rejected_after_make_executable() {
+        let mut jit = JitMemory::new(1).unwrap();
+        jit.write(&[0xC3]).unwrap();
+        jit.make_executable().unwrap();
+
+        assert!(jit.write(&[0x90]).is_err());
+    }
+
+    #[test]
+    fn rejects_write_past_allocated_region() {
+        let page_size = JitMemory::page_size();
+        let mut jit = JitMemory::new(1).unwrap();
+        let too_large = vec![0u8; page_size + 1];
+
+        assert!(jit.write(&too_large).is_err());
+    }
+
+    #[test]
+    fn executes_simple_function() {
+        // mov eax, 42; ret
+        let code = [0xB8, 42, 0, 0, 0, 0xC3];
+        let mut jit = JitMemory::new(code.len()).unwrap();
+        jit.write(&code).unwrap();
+        jit.make_executable().unwrap();
+
+        let func = unsafe { jit.as_fn() }.unwrap();
+        assert_eq!(func(), 42);
+    }
+}
