@@ -1,5 +1,5 @@
-use crate::encoding::{modrm, rex_w, sib};
-use crate::registers::Register;
+use crate::encoding::{modrm, rex, rex_w, sib};
+use crate::registers::{Register, XmmRegister};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -78,6 +78,7 @@ pub enum Operand {
     Imm64(u64),
     Imm32(i32),
     Mem(MemoryAddr),
+    Xmm(XmmRegister),
 }
 
 impl fmt::Display for Operand {
@@ -88,6 +89,7 @@ impl fmt::Display for Operand {
             Operand::Imm32(v) if *v < 0 => write!(f, "{}", v),
             Operand::Imm32(v)            => write!(f, "0x{:X}", v),
             Operand::Mem(m)              => write!(f, "qword {}", m),
+            Operand::Xmm(r)              => write!(f, "{}", r),
         }
     }
 }
@@ -100,6 +102,7 @@ impl fmt::Display for Operand {
 pub enum Instruction {
     // Data movement
     Mov(Operand, Operand),
+    Movsd(Operand, Operand),
     Push(Operand),
     Pop(Operand),
 
@@ -142,6 +145,7 @@ impl fmt::Display for Instruction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Instruction::Mov(d, s)     => write!(f, "mov {}, {}", d, s),
+            Instruction::Movsd(d, s)   => write!(f, "movsd {}, {}", d, s),
             Instruction::Push(o)       => write!(f, "push {}", o),
             Instruction::Pop(o)        => write!(f, "pop {}", o),
             Instruction::Add(d, s)     => write!(f, "add {}, {}", d, s),
@@ -269,6 +273,7 @@ pub fn encode_instruction(instr: Instruction) -> Result<Vec<u8>, EncodeError> {
     match instr {
         // Data movement
         Instruction::Mov(dst, src)  => encode_mov(dst, src, &mut bytes)?,
+        Instruction::Movsd(dst, src) => encode_movsd(dst, src, &mut bytes)?,
         Instruction::Push(op)       => encode_push(op, &mut bytes)?,
         Instruction::Pop(op)        => encode_pop(op, &mut bytes)?,
 
@@ -355,6 +360,47 @@ fn encode_mov(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), Enc
         }
         _ => return Err(EncodeError::UnsupportedOperand(
             "MOV: unsupported operand combination".into()
+        )),
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// MOVSD
+// ---------------------------------------------------------------------------
+
+fn emit_optional_rex(r: bool, x: bool, b: bool, bytes: &mut Vec<u8>) {
+    if r || x || b {
+        bytes.push(rex(false, r, x, b));
+    }
+}
+
+fn encode_movsd(dst: Operand, src: Operand, bytes: &mut Vec<u8>) -> Result<(), EncodeError> {
+    match (dst, src) {
+        // MOVSD xmm, xmm/m64 -> F2 [REX] 0F 10 /r
+        (Operand::Xmm(dst_r), Operand::Xmm(src_r)) => {
+            bytes.push(0xF2);
+            emit_optional_rex(dst_r.is_extended(), false, src_r.is_extended(), bytes);
+            bytes.extend_from_slice(&[0x0F, 0x10]);
+            bytes.push(modrm(0b11, dst_r.code(), src_r.code()));
+        }
+        (Operand::Xmm(dst_r), Operand::Mem(mem)) => {
+            let encoded = encode_memory(dst_r.code(), mem)?;
+            bytes.push(0xF2);
+            emit_optional_rex(dst_r.is_extended(), encoded.rex_x, encoded.rex_b, bytes);
+            bytes.extend_from_slice(&[0x0F, 0x10]);
+            encoded.emit(bytes);
+        }
+        // MOVSD xmm/m64, xmm -> F2 [REX] 0F 11 /r
+        (Operand::Mem(mem), Operand::Xmm(src_r)) => {
+            let encoded = encode_memory(src_r.code(), mem)?;
+            bytes.push(0xF2);
+            emit_optional_rex(src_r.is_extended(), encoded.rex_x, encoded.rex_b, bytes);
+            bytes.extend_from_slice(&[0x0F, 0x11]);
+            encoded.emit(bytes);
+        }
+        _ => return Err(EncodeError::UnsupportedOperand(
+            "MOVSD: expected xmm/xmm or xmm/memory operands".into()
         )),
     }
     Ok(())
@@ -697,6 +743,25 @@ mod tests {
         assert_eq!(enc(Instruction::Call(Operand::Reg(R10))), vec![0x41, 0xFF, 0xD2]);
         assert_eq!(enc(Instruction::Ret), vec![0xC3]);
         assert_eq!(enc(Instruction::Syscall), vec![0x0F, 0x05]);
+    }
+
+    #[test]
+    fn movsd_encodes_register_forms() {
+        use crate::registers::XmmRegister::*;
+
+        assert_eq!(enc(Instruction::Movsd(Operand::Xmm(XMM0), Operand::Xmm(XMM1))), vec![0xF2, 0x0F, 0x10, 0xC1]);
+        assert_eq!(enc(Instruction::Movsd(Operand::Xmm(XMM8), Operand::Xmm(XMM9))), vec![0xF2, 0x45, 0x0F, 0x10, 0xC1]);
+    }
+
+    #[test]
+    fn movsd_encodes_memory_load_and_store() {
+        use crate::registers::XmmRegister::*;
+
+        let load = MemoryAddr::base_disp(R12, 16);
+        assert_eq!(enc(Instruction::Movsd(Operand::Xmm(XMM10), Operand::Mem(load))), vec![0xF2, 0x45, 0x0F, 0x10, 0x54, 0x24, 0x10]);
+
+        let store = MemoryAddr::base_disp(R13, 0);
+        assert_eq!(enc(Instruction::Movsd(Operand::Mem(store), Operand::Xmm(XMM15))), vec![0xF2, 0x45, 0x0F, 0x11, 0x7D, 0x00]);
     }
 
     #[test]
