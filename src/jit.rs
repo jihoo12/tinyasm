@@ -322,6 +322,29 @@ mod tests {
     }
 
     #[test]
+    fn executes_assembled_sse2_function() {
+        use crate::{Assembler, Instruction, Operand, XmmRegister};
+
+        let mut asm = Assembler::new();
+        asm.add_instruction(Instruction::Addsd(
+            Operand::Xmm(XmmRegister::XMM0),
+            Operand::Xmm(XmmRegister::XMM1),
+        ));
+        asm.add_instruction(Instruction::Ret);
+        let code = asm.assemble().unwrap();
+
+        assert_eq!(code, vec![0xF2, 0x0F, 0x58, 0xC1, 0xC3]);
+
+        let mut jit = JitMemory::new(code.len()).unwrap();
+        jit.write(&code).unwrap();
+        jit.make_executable().unwrap();
+
+        let func: extern "C" fn(f64, f64) -> f64 =
+            unsafe { jit.as_typed_fn() }.unwrap();
+        assert_eq!(func(1.5, 2.25), 3.75);
+    }
+
+    #[test]
     fn executes_typed_f64_sse2_function() {
         // System V x86-64: f64 arguments arrive in XMM0/XMM1 and the result
         // is returned in XMM0.  addsd xmm0, xmm1; ret
