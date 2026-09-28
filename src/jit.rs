@@ -12,6 +12,32 @@ enum Protection {
     ReadExec,
 }
 
+
+/// Function-pointer types that may be constructed from JIT code.
+///
+/// # Safety
+/// Implementors must be pointer-sized C-ABI function-pointer types.
+#[cfg(target_arch = "x86_64")]
+pub unsafe trait JitFunction: Copy {
+    unsafe fn from_ptr(ptr: *mut u8) -> Self;
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! impl_jit_function {
+    ($(($($arg:ident),*)),* $(,)?) => {
+        $(
+            unsafe impl<R, $($arg,)*> JitFunction for extern "C" fn($($arg),*) -> R {
+                unsafe fn from_ptr(ptr: *mut u8) -> Self {
+                    unsafe { std::mem::transmute(ptr) }
+                }
+            }
+        )*
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+impl_jit_function!((), (A0), (A0, A1), (A0, A1, A2), (A0, A1, A2, A3));
+
 /// A region of executable memory for JIT-compiled machine code.
 ///
 /// Memory is allocated via `mmap` with `RW` permissions (writable, not
@@ -201,7 +227,26 @@ impl JitMemory {
         // SAFETY: addr is a non-null, page-aligned pointer to at least
         // `self.written` bytes of RX memory.  The caller is responsible for
         // ABI correctness.
-        Ok(unsafe { std::mem::transmute(self.addr) })
+        unsafe { self.as_typed_fn() }
+    }
+
+    /// Return the start of the JIT region as a typed C-ABI function pointer.
+    ///
+    /// # Safety
+    /// The caller must ensure the emitted machine code obeys the exact ABI,
+    /// argument types, return type, and callee-saved register requirements of F.
+    pub unsafe fn as_typed_fn<F: JitFunction>(&self) -> Result<F, String> {
+        if self.state != Protection::ReadExec {
+            return Err(
+                "cannot obtain function pointer before make_executable() has been called".into(),
+            );
+        }
+
+        if self.written == 0 {
+            return Err("JIT region is empty — no code has been written".into());
+        }
+
+        Ok(unsafe { F::from_ptr(self.addr) })
     }
 
     /// Returns the OS page size in bytes.
@@ -274,6 +319,20 @@ mod tests {
         let too_large = vec![0u8; page_size + 1];
 
         assert!(jit.write(&too_large).is_err());
+    }
+
+    #[test]
+    fn executes_typed_f64_sse2_function() {
+        // System V x86-64: f64 arguments arrive in XMM0/XMM1 and the result
+        // is returned in XMM0.  addsd xmm0, xmm1; ret
+        let code = [0xF2, 0x0F, 0x58, 0xC1, 0xC3];
+        let mut jit = JitMemory::new(code.len()).unwrap();
+        jit.write(&code).unwrap();
+        jit.make_executable().unwrap();
+
+        let func: extern "C" fn(f64, f64) -> f64 =
+            unsafe { jit.as_typed_fn() }.unwrap();
+        assert_eq!(func(1.5, 2.25), 3.75);
     }
 
     #[test]
