@@ -143,6 +143,12 @@ impl Assembler {
                     self.debug_bytes(&bytes);
                     out.extend(bytes);
                 }
+                Instruction::JaLabel(target) => {
+                    // 0F 87 rel32  (6 bytes) — unsigned above (CF=0 && ZF=0)
+                    let bytes = self.encode_rel32_jump(&[0x0F, 0x87], target, offset, 6)?;
+                    self.debug_bytes(&bytes);
+                    out.extend(bytes);
+                }
 
                 other => {
                     let bytes = encode_instruction(other.clone())?;
@@ -203,7 +209,8 @@ impl Assembler {
             | Instruction::JlLabel(_)
             | Instruction::JleLabel(_)
             | Instruction::JgeLabel(_)
-            | Instruction::JgLabel(_) => Ok(6),
+            | Instruction::JgLabel(_)
+            | Instruction::JaLabel(_) => Ok(6),
             other => encode_instruction(other.clone()).map(|b| b.len()),
         }
     }
