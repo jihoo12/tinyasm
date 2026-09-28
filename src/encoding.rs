@@ -4,10 +4,16 @@
 //! Higher-level encoders should describe operands/opcodes and delegate bit
 //! packing here instead of open-coding REX, ModR/M, or SIB bytes.
 
-/// Build a REX.W prefix (0100 WRXB) for a 64-bit operand.
+/// Build a REX prefix (0100 WRXB).
+#[inline]
+pub(crate) const fn rex(w: bool, r: bool, x: bool, b: bool) -> u8 {
+    0x40 | ((w as u8) << 3) | ((r as u8) << 2) | ((x as u8) << 1) | (b as u8)
+}
+
+/// Build a REX.W prefix for a 64-bit operand.
 #[inline]
 pub(crate) const fn rex_w(r: bool, x: bool, b: bool) -> u8 {
-    0x48 | ((r as u8) << 2) | ((x as u8) << 1) | (b as u8)
+    rex(true, r, x, b)
 }
 
 /// Build a ModR/M byte from its three logical fields.
@@ -25,6 +31,13 @@ pub(crate) const fn sib(scale_bits: u8, index: u8, base: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rex_packs_all_bits() {
+        assert_eq!(rex(false, false, false, false), 0x40);
+        assert_eq!(rex(false, true, true, true), 0x47);
+        assert_eq!(rex(true, true, true, true), 0x4f);
+    }
 
     #[test]
     fn rex_w_packs_extension_bits() {
