@@ -75,3 +75,27 @@ impl std::fmt::Display for Register {
         write!(f, "{}", s)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmmRegister {
+    XMM0, XMM1, XMM2, XMM3,
+    XMM4, XMM5, XMM6, XMM7,
+    XMM8, XMM9, XMM10, XMM11,
+    XMM12, XMM13, XMM14, XMM15,
+}
+
+impl XmmRegister {
+    pub fn code(self) -> u8 {
+        self as u8 & 0b111
+    }
+
+    pub fn is_extended(self) -> bool {
+        (self as u8) >= 8
+    }
+}
+
+impl std::fmt::Display for XmmRegister {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "xmm{}", *self as u8)
+    }
+}
