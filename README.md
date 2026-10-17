@@ -1,6 +1,28 @@
 ## x86-64 JIT Assembler in Rust
 A lightweight, educational x86-64 assembler and JIT execution engine written in Rust. This project demonstrates how to translate assembly-like instructions into raw machine code (binary) and execute them directly in memory at runtime using mmap and mprotect.
 
+## Quick Start
+
+Install the stable Rust toolchain, including Cargo, and use an x86-64 Linux or macOS environment for the JIT example.
+
+```sh
+git clone https://github.com/jihoo12/tinyasm.git
+cd tinyasm
+cargo run
+```
+
+The example assembles a loop that increments RAX from 0 to 5, prints the generated machine code, and executes it. The final output line should be:
+
+```text
+JIT result: 5
+```
+
+To run the test suite:
+
+```sh
+cargo test
+```
+
 ## Key Features
 - 2-Pass Assembler: Supports symbol resolution for labels, allowing for forward and backward jumps.
 
