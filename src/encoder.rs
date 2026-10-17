@@ -34,9 +34,11 @@ impl std::error::Error for EncodeError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryAddr {
     pub base:  Option<Register>,
+    /// Optional index register. RSP is not encodable; R12 is supported.
     pub index: Option<Register>,
     /// Must be 1, 2, 4, or 8.  Ignored when `index` is `None`.
     pub scale: u8,
+    /// Signed displacement; with no base or index, a sign-extended absolute disp32 address.
     pub disp:  i32,
 }
 
@@ -221,6 +223,13 @@ impl EncodedMemory {
 /// Encode the ModR/M, optional SIB, displacement, and REX extension bits for
 /// a memory operand. `reg_field` is either a register code or opcode extension.
 fn encode_memory(reg_field: u8, mem: MemoryAddr) -> Result<EncodedMemory, EncodeError> {
+    // SIB index=100 without REX.X means no index, rather than RSP.
+    if mem.index == Some(Register::RSP) {
+        return Err(EncodeError::UnsupportedOperand(
+            "RSP cannot be used as a memory index register".into(),
+        ));
+    }
+
     // Choose mod bits and displacement size.
     let (mod_bits, disp_size) = if let Some(base) = mem.base {
         // RBP/R13 with mod=00 would be interpreted as RIP-relative, so force
@@ -240,7 +249,9 @@ fn encode_memory(reg_field: u8, mem: MemoryAddr) -> Result<EncodedMemory, Encode
 
     // RSP/R12 share the 3-bit code 0b100 with the "SIB follows" sentinel, so
     // any addressing using them as the base *must* include a SIB byte.
-    let use_sib = mem.index.is_some()
+    // A missing base also requires SIB: ModR/M r/m=101 alone is RIP-relative.
+    let use_sib = mem.base.is_none()
+        || mem.index.is_some()
         || mem.base == Some(Register::RSP)
         || mem.base == Some(Register::R12);
 
@@ -259,7 +270,7 @@ fn encode_memory(reg_field: u8, mem: MemoryAddr) -> Result<EncodedMemory, Encode
     let rex_x = mem.index.is_some_and(|r| r.is_extended());
 
     let sib = if use_sib {
-        let scale_bits = match mem.scale {
+        let scale_bits = match if mem.index.is_some() { mem.scale } else { 1 } {
             1 => 0u8, 2 => 1, 4 => 2, 8 => 3,
             s => return Err(EncodeError::InvalidScale(s)),
         };
@@ -907,6 +918,42 @@ mod tests {
             encode_instruction(Instruction::JaLabel("target".into())),
             Err(EncodeError::Other(_))
         ));
+    }
+
+    #[test]
+    fn rsp_index_is_rejected_but_r12_index_is_supported() {
+        for base in [None, Some(RAX)] {
+            let mem = MemoryAddr { base, index: Some(RSP), scale: 2, disp: 0 };
+            assert!(matches!(
+                encode_instruction(Instruction::Mov(Operand::Reg(RDX), Operand::Mem(mem))),
+                Err(EncodeError::UnsupportedOperand(_))
+            ));
+        }
+        let mem = MemoryAddr { base: Some(RAX), index: Some(R12), scale: 2, disp: 0 };
+        assert_eq!(enc(Instruction::Mov(Operand::Reg(RDX), Operand::Mem(mem))),
+            vec![0x4A, 0x8B, 0x14, 0x60]);
+    }
+
+    #[test]
+    fn displacement_only_address_uses_absolute_sib_encoding() {
+        for disp in [0, 0x12345678, -1, i32::MIN] {
+            let mem = MemoryAddr { base: None, index: None, scale: 1, disp };
+            let mut expected = vec![0x48, 0x8B, 0x14, 0x25];
+            expected.extend_from_slice(&disp.to_le_bytes());
+            assert_eq!(enc(Instruction::Mov(Operand::Reg(RDX), Operand::Mem(mem))), expected);
+        }
+    }
+
+    #[test]
+    fn scale_is_ignored_without_an_index() {
+        for base in [None, Some(RAX), Some(RSP), Some(R12)] {
+            let mem = MemoryAddr { base, index: None, scale: 1, disp: 16 };
+            let expected = enc(Instruction::Mov(Operand::Reg(RDX), Operand::Mem(mem)));
+            for scale in [0, 3, 8, 255] {
+                assert_eq!(enc(Instruction::Mov(Operand::Reg(RDX),
+                    Operand::Mem(MemoryAddr { scale, ..mem }))), expected);
+            }
+        }
     }
 
     #[test]
